@@ -8,6 +8,8 @@ const DEFAULT_RENDEZVOUS_PORT: i32 = 21116;
 const DEFAULT_RELAY_PORT: i32 = 21117;
 const DEFAULT_WS_RENDEZVOUS_PORT: i32 = 21118;
 const DEFAULT_WS_RELAY_PORT: i32 = 21119;
+const DEFAULT_TEMPORARY_PASSWORD_DERIVE_SALT: &str = "";
+const DEFAULT_TEMPORARY_PASSWORD_WINDOW_SECONDS: i64 = 300;
 
 const BUILD_CONFIG_PATH_ENV: &str = "HBB_CONFIG_PATH";
 const RENDEZVOUS_SERVER_ENV: &str = "RENDEZVOUS_SERVER";
@@ -18,6 +20,8 @@ const RENDEZVOUS_PORT_ENV: &str = "RENDEZVOUS_PORT";
 const RELAY_PORT_ENV: &str = "RELAY_PORT";
 const WS_RENDEZVOUS_PORT_ENV: &str = "WS_RENDEZVOUS_PORT";
 const WS_RELAY_PORT_ENV: &str = "WS_RELAY_PORT";
+const TEMPORARY_PASSWORD_SALT_ENV: &str = "TEMPORARY_PASSWORD_SALT";
+const TEMPORARY_PASSWORD_WINDOW_SECONDS_ENV: &str = "TEMPORARY_PASSWORD_WINDOW_SECONDS";
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
@@ -30,6 +34,8 @@ struct ExternalBuildConfig {
     relay_port: Option<i32>,
     ws_rendezvous_port: Option<i32>,
     ws_relay_port: Option<i32>,
+    temporary_password_salt: Option<String>,
+    temporary_password_window_seconds: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -41,6 +47,8 @@ struct BuildConfig {
     relay_port: i32,
     ws_rendezvous_port: i32,
     ws_relay_port: i32,
+    temporary_password_derive_salt: String,
+    temporary_password_window_seconds: i64,
 }
 
 impl Default for BuildConfig {
@@ -56,6 +64,8 @@ impl Default for BuildConfig {
             relay_port: DEFAULT_RELAY_PORT,
             ws_rendezvous_port: DEFAULT_WS_RENDEZVOUS_PORT,
             ws_relay_port: DEFAULT_WS_RELAY_PORT,
+            temporary_password_derive_salt: DEFAULT_TEMPORARY_PASSWORD_DERIVE_SALT.to_string(),
+            temporary_password_window_seconds: DEFAULT_TEMPORARY_PASSWORD_WINDOW_SECONDS,
         }
     }
 }
@@ -112,6 +122,13 @@ impl BuildConfig {
         if let Some(value) = file_config.ws_relay_port {
             self.ws_relay_port = validate_port(value, "ws_relay_port");
         }
+        if let Some(value) = file_config.temporary_password_salt {
+            self.temporary_password_derive_salt = value.trim().to_string();
+        }
+        if let Some(value) = file_config.temporary_password_window_seconds {
+            self.temporary_password_window_seconds =
+                validate_positive_i64(value, "temporary_password_window_seconds");
+        }
     }
 
     fn apply_env(&mut self) {
@@ -142,6 +159,13 @@ impl BuildConfig {
         if let Some(value) = read_env_i32(WS_RELAY_PORT_ENV) {
             self.ws_relay_port = value;
         }
+        if let Some(value) = read_env_string(TEMPORARY_PASSWORD_SALT_ENV) {
+            self.temporary_password_derive_salt = value;
+        }
+        if let Some(value) = read_env_i64(TEMPORARY_PASSWORD_WINDOW_SECONDS_ENV) {
+            self.temporary_password_window_seconds =
+                validate_positive_i64(value, TEMPORARY_PASSWORD_WINDOW_SECONDS_ENV);
+        }
     }
 }
 
@@ -166,6 +190,13 @@ fn require_non_empty(value: String, name: &str) -> String {
 }
 
 fn validate_port(value: i32, name: &str) -> i32 {
+    if value <= 0 {
+        panic!("{} must be a positive integer", name);
+    }
+    value
+}
+
+fn validate_positive_i64(value: i64, name: &str) -> i64 {
     if value <= 0 {
         panic!("{} must be a positive integer", name);
     }
@@ -198,6 +229,14 @@ fn read_env_i32(name: &str) -> Option<i32> {
     })
 }
 
+fn read_env_i64(name: &str) -> Option<i64> {
+    read_env_string(name).map(|value| {
+        value.parse::<i64>().unwrap_or_else(|err| {
+            panic!("{} must be a valid integer: {}", name, err);
+        })
+    })
+}
+
 fn render_build_config(config: &BuildConfig) -> String {
     let rendezvous_servers = config
         .rendezvous_servers
@@ -214,13 +253,17 @@ pub const API_SERVER: &str = {api_server:?};\n\
 pub const RENDEZVOUS_PORT: i32 = {rendezvous_port};\n\
 pub const RELAY_PORT: i32 = {relay_port};\n\
 pub const WS_RENDEZVOUS_PORT: i32 = {ws_rendezvous_port};\n\
-pub const WS_RELAY_PORT: i32 = {ws_relay_port};\n",
+pub const WS_RELAY_PORT: i32 = {ws_relay_port};\n\
+pub const TEMPORARY_PASSWORD_DERIVE_SALT: &str = {temporary_password_derive_salt:?};\n\
+pub const TEMPORARY_PASSWORD_WINDOW_SECONDS: i64 = {temporary_password_window_seconds};\n",
         rs_pub_key = config.rs_pub_key,
         rendezvous_port = config.rendezvous_port,
         relay_port = config.relay_port,
         ws_rendezvous_port = config.ws_rendezvous_port,
         ws_relay_port = config.ws_relay_port,
         api_server = config.api_server,
+        temporary_password_derive_salt = config.temporary_password_derive_salt,
+        temporary_password_window_seconds = config.temporary_password_window_seconds,
     )
 }
 

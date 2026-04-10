@@ -1,9 +1,24 @@
 use crate::config::Config;
+use sha2::{Digest, Sha256};
 use sodiumoxide::base64;
-use std::sync::{Arc, RwLock};
+use std::{
+    sync::{Arc, RwLock},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+const DERIVED_TEMPORARY_PASSWORD_VERSION: &str = "rustdesk-derived-temporary-password-v1";
+const DERIVED_TEMPORARY_PASSWORD_WINDOW_TOLERANCE: i64 = 1;
+const DERIVED_TEMPORARY_PASSWORD_NUM_CHARS: &[char] =
+    &['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
+const DERIVED_TEMPORARY_PASSWORD_CHARS: &[char] = &[
+    '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k',
+    'm', 'n', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+];
 
 lazy_static::lazy_static! {
     pub static ref TEMPORARY_PASSWORD:Arc<RwLock<String>> = Arc::new(RwLock::new(get_auto_password()));
+    static ref DERIVED_TEMPORARY_PASSWORD_LOCKED_WINDOW: RwLock<Option<i64>> =
+        RwLock::new(None);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,7 +35,127 @@ pub enum ApproveMode {
     Click,
 }
 
+fn derived_temporary_password_enabled() -> bool {
+    !crate::config::TEMPORARY_PASSWORD_DERIVE_SALT.is_empty()
+}
+
+pub fn temporary_password_supports_rotation() -> bool {
+    !derived_temporary_password_enabled()
+}
+
+pub fn lock_temporary_password_until_next_window() {
+    if !derived_temporary_password_enabled() {
+        return;
+    }
+    *DERIVED_TEMPORARY_PASSWORD_LOCKED_WINDOW.write().unwrap() =
+        Some(current_temporary_password_window());
+}
+
+fn derived_temporary_password_lock_is_active(current_window: i64) -> bool {
+    let mut locked_window = DERIVED_TEMPORARY_PASSWORD_LOCKED_WINDOW.write().unwrap();
+    match *locked_window {
+        Some(window) if window >= current_window => true,
+        Some(_) => {
+            *locked_window = None;
+            false
+        }
+        None => false,
+    }
+}
+
+fn temporary_password_window_seconds() -> i64 {
+    crate::config::TEMPORARY_PASSWORD_WINDOW_SECONDS.max(1)
+}
+
+fn current_temporary_password_window() -> i64 {
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    now_secs.div_euclid(temporary_password_window_seconds())
+}
+
+fn temporary_password_chars() -> &'static [char] {
+    if Config::get_bool_option(crate::config::keys::OPTION_ALLOW_NUMERNIC_ONE_TIME_PASSWORD) {
+        DERIVED_TEMPORARY_PASSWORD_NUM_CHARS
+    } else {
+        DERIVED_TEMPORARY_PASSWORD_CHARS
+    }
+}
+
+fn temporary_password_uuid_base64() -> String {
+    base64::encode(&crate::get_uuid(), base64::Variant::Original)
+}
+
+fn derive_temporary_password_from_inputs(
+    uuid_base64: &str,
+    salt: &str,
+    window_seconds: i64,
+    window_index: i64,
+    length: usize,
+    chars: &[char],
+) -> String {
+    if uuid_base64.is_empty() || salt.is_empty() || length == 0 || chars.is_empty() {
+        return String::new();
+    }
+
+    let charset_name = if chars == DERIVED_TEMPORARY_PASSWORD_NUM_CHARS {
+        "numeric"
+    } else {
+        "mixed"
+    };
+    let mut password = String::with_capacity(length);
+    let mut block_index = 0usize;
+
+    while password.len() < length {
+        let window_seconds_str = window_seconds.to_string();
+        let window_index_str = window_index.to_string();
+        let length_str = length.to_string();
+        let block_index_str = block_index.to_string();
+        let mut hasher = Sha256::new();
+        for field in [
+            DERIVED_TEMPORARY_PASSWORD_VERSION,
+            salt,
+            uuid_base64,
+            &window_seconds_str,
+            &window_index_str,
+            &length_str,
+            charset_name,
+            &block_index_str,
+        ] {
+            hasher.update(field.as_bytes());
+            hasher.update([0]);
+        }
+
+        for byte in hasher.finalize() {
+            password.push(chars[byte as usize % chars.len()]);
+            if password.len() == length {
+                break;
+            }
+        }
+
+        block_index += 1;
+    }
+
+    password
+}
+
+fn derived_temporary_password_for_window(window_index: i64) -> String {
+    derive_temporary_password_from_inputs(
+        &temporary_password_uuid_base64(),
+        crate::config::TEMPORARY_PASSWORD_DERIVE_SALT,
+        temporary_password_window_seconds(),
+        window_index,
+        temporary_password_length(),
+        temporary_password_chars(),
+    )
+}
+
 fn get_auto_password() -> String {
+    if derived_temporary_password_enabled() {
+        return derived_temporary_password_for_window(current_temporary_password_window());
+    }
+
     let len = temporary_password_length();
     if Config::get_bool_option(crate::config::keys::OPTION_ALLOW_NUMERNIC_ONE_TIME_PASSWORD) {
         Config::get_auto_numeric_password(len)
@@ -36,7 +171,39 @@ pub fn update_temporary_password() {
 
 // Should only be called in server
 pub fn temporary_password() -> String {
+    if derived_temporary_password_enabled() {
+        return derived_temporary_password_for_window(current_temporary_password_window());
+    }
     TEMPORARY_PASSWORD.read().unwrap().clone()
+}
+
+pub fn temporary_password_candidates() -> Vec<String> {
+    if !derived_temporary_password_enabled() {
+        let password = TEMPORARY_PASSWORD.read().unwrap().clone();
+        return if password.is_empty() {
+            vec![]
+        } else {
+            vec![password]
+        };
+    }
+
+    let current_window = current_temporary_password_window();
+    if derived_temporary_password_lock_is_active(current_window) {
+        return vec![];
+    }
+
+    let mut passwords = Vec::with_capacity(3);
+    for offset in [
+        0,
+        -DERIVED_TEMPORARY_PASSWORD_WINDOW_TOLERANCE,
+        DERIVED_TEMPORARY_PASSWORD_WINDOW_TOLERANCE,
+    ] {
+        let password = derived_temporary_password_for_window(current_window + offset);
+        if !password.is_empty() && !passwords.contains(&password) {
+            passwords.push(password);
+        }
+    }
+    passwords
 }
 
 fn verification_method() -> VerificationMethod {
@@ -470,5 +637,52 @@ mod test {
             "Decryption with pk fallback should succeed"
         );
         assert_eq!(decrypted.unwrap(), data);
+    }
+
+    #[test]
+    fn test_derived_temporary_password_is_stable() {
+        let password_a = derive_temporary_password_from_inputs(
+            "dGVzdC11dWlkLWJhc2U2NA==",
+            "demo-salt",
+            300,
+            5_712_345,
+            8,
+            DERIVED_TEMPORARY_PASSWORD_CHARS,
+        );
+        let password_b = derive_temporary_password_from_inputs(
+            "dGVzdC11dWlkLWJhc2U2NA==",
+            "demo-salt",
+            300,
+            5_712_345,
+            8,
+            DERIVED_TEMPORARY_PASSWORD_CHARS,
+        );
+        let password_next_window = derive_temporary_password_from_inputs(
+            "dGVzdC11dWlkLWJhc2U2NA==",
+            "demo-salt",
+            300,
+            5_712_346,
+            8,
+            DERIVED_TEMPORARY_PASSWORD_CHARS,
+        );
+
+        assert_eq!(password_a, password_b);
+        assert_eq!(password_a.len(), 8);
+        assert_ne!(password_a, password_next_window);
+    }
+
+    #[test]
+    fn test_derived_temporary_password_numeric_mode() {
+        let password = derive_temporary_password_from_inputs(
+            "dGVzdC11dWlkLWJhc2U2NA==",
+            "demo-salt",
+            300,
+            5_712_345,
+            6,
+            DERIVED_TEMPORARY_PASSWORD_NUM_CHARS,
+        );
+
+        assert_eq!(password.len(), 6);
+        assert!(password.chars().all(|c| c.is_ascii_digit()));
     }
 }
