@@ -242,20 +242,22 @@ pub fn has_valid_password() -> bool {
 }
 
 pub fn approve_mode() -> ApproveMode {
-    let mode = Config::get_option("approve-mode");
-    if mode == "password" {
-        ApproveMode::Password
-    } else if mode == "click" {
-        ApproveMode::Click
-    } else {
-        ApproveMode::Both
-    }
+    ApproveMode::Password // for now we only have password approve, click approve is not implemented yet
+    // let mode = Config::get_option("approve-mode");
+    // if mode == "password" {
+    //     ApproveMode::Password
+    // } else if mode == "click" {
+    //     ApproveMode::Click
+    // } else {
+    //     ApproveMode::Both
+    // }
 }
 
 pub fn hide_cm() -> bool {
-    approve_mode() == ApproveMode::Password
-        && verification_method() == VerificationMethod::OnlyUsePermanentPassword
-        && crate::config::option2bool("allow-hide-cm", &Config::get_option("allow-hide-cm"))
+    true // for now we always hide cm when password is enabled, since click approve is not implemented yet and password approve can work with cm hidden. We can add more options later if needed.
+    // approve_mode() == ApproveMode::Password
+    //     && verification_method() == VerificationMethod::OnlyUsePermanentPassword
+    //     && crate::config::option2bool("allow-hide-cm", &Config::get_option("allow-hide-cm"))
 }
 
 const VERSION_LEN: usize = 2;
